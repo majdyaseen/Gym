@@ -210,8 +210,37 @@
     background: rgba(34,197,94,0.05);
   }
 
-  .exercise-card.cardio-card::before { background: var(--accent2); }
-  .exercise-card.cardio-card .exercise-name { color: #ff7a40; }
+  .done-btn {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 5px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .done-btn:hover { border-color: var(--done); color: var(--done); }
+  .done-btn.done-btn-active { background: rgba(34,197,94,0.12); border-color: var(--done); color: var(--done); }
+
+  .day-nav {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 24px;
+  }
+  .day-nav-btn {
+    background: var(--card); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px;
+    padding: 8px 16px; font-family: 'DM Mono', monospace;
+    font-size: 0.72rem; letter-spacing: 1px;
+    cursor: pointer; transition: all 0.2s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .day-nav-btn:hover { border-color: #555; background: #222; }
+  .day-nav-btn.today-btn { border-color: rgba(232,255,0,0.4); color: var(--accent); }
+  .day-nav-btn.today-btn:hover { background: rgba(232,255,0,0.08); }
 
   .exercise-card.done .exercise-name { text-decoration: line-through; color: var(--muted); }
 
@@ -501,6 +530,8 @@
   .week-day-cell.has-data .week-day-score { color: var(--done); }
   .week-day-cell.today { border-color: var(--accent); }
   .week-day-cell.today .week-day-name { color: var(--accent); }
+  .week-day-cell.viewing { border-color: rgba(255,77,0,0.5); }
+  .week-day-cell.viewing .week-day-name { color: var(--accent2); }
 
   /* STREAK BANNER */
   .streak-banner {
@@ -690,6 +721,12 @@
         </div>
         <div class="progress-label">DONE<br>TODAY</div>
       </div>
+    </div>
+
+    <div class="day-nav">
+      <button class="day-nav-btn" onclick="navigateDay(-1)">← Prev Day</button>
+      <button class="day-nav-btn" onclick="navigateDay(1)">Next Day →</button>
+      <button class="day-nav-btn today-btn" id="goTodayBtn" onclick="advanceToToday()" style="display:none;">⬤ Go to Today</button>
     </div>
 
     <div style="display:flex; align-items:center; gap:10px; margin-bottom:20px; flex-wrap:wrap;">
@@ -1000,6 +1037,7 @@ const FOOD_DB = [
 // STATE
 // =====================
 let state = {};
+let currentViewDate = null; // manually controlled — does NOT auto-advance
 
 function loadState() {
   try {
@@ -1008,18 +1046,47 @@ function loadState() {
   if (!state.workoutLog) state.workoutLog = {};
   if (!state.foodLog) state.foodLog = {};
   if (!state.completedExercises) state.completedExercises = {};
+  // Default view date: load from storage so it persists across reload
+  // but NEVER auto-advance — user must press "Next Day"
+  if (!state.viewDate) {
+    state.viewDate = new Date().toISOString().split('T')[0];
+    saveState();
+  }
+  currentViewDate = state.viewDate;
 }
 
 function saveState() {
   localStorage.setItem('ironlog', JSON.stringify(state));
 }
 
-function getTodayKey() {
+function getRealTodayKey() {
   return new Date().toISOString().split('T')[0];
 }
 
-function getDayOfWeek() {
-  return new Date().getDay();
+function getViewKey() {
+  return currentViewDate;
+}
+
+function getViewDayOfWeek() {
+  return new Date(currentViewDate + 'T12:00:00').getDay();
+}
+
+function navigateDay(delta) {
+  const d = new Date(currentViewDate + 'T12:00:00');
+  d.setDate(d.getDate() + delta);
+  currentViewDate = d.toISOString().split('T')[0];
+  state.viewDate = currentViewDate;
+  saveState();
+  renderWorkout();
+  updateHeader();
+}
+
+function advanceToToday() {
+  currentViewDate = getRealTodayKey();
+  state.viewDate = currentViewDate;
+  saveState();
+  renderWorkout();
+  updateHeader();
 }
 
 // =====================
@@ -1044,56 +1111,62 @@ function showToast(msg) {
 // WORKOUT
 // =====================
 function renderWorkout() {
-  const dayNum = getDayOfWeek();
+  const dayNum = getViewDayOfWeek();
   const day = WEEKLY_ROUTINE[dayNum];
-  const todayKey = getTodayKey();
+  const viewKey = getViewKey();
+  const realToday = getRealTodayKey();
 
-  if (!state.completedExercises[todayKey]) state.completedExercises[todayKey] = {};
+  if (!state.completedExercises[viewKey]) state.completedExercises[viewKey] = {};
 
-  const days = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
   const fullDates = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   document.getElementById('dayName').textContent = day.name;
   document.getElementById('dayType').textContent = fullDates[dayNum].toUpperCase() + ' — ' + (day.type === 'rest' ? 'REST & RECOVERY' : day.type === 'active' ? 'ACTIVE RECOVERY' : 'TRAINING DAY');
 
+  const goTodayBtn = document.getElementById('goTodayBtn');
+  if (goTodayBtn) goTodayBtn.style.display = viewKey !== realToday ? 'inline-flex' : 'none';
+
   const content = document.getElementById('workout-content');
+
+  let allExercises = [];
+  ['warmup', 'main', 'cooldown'].forEach(section => {
+    if (day[section] && day[section].length) {
+      day[section].forEach(ex => allExercises.push(section + '::' + ex.name));
+    }
+  });
 
   if (day.type === 'rest') {
     content.innerHTML = `
       <div class="rest-day">
         <div class="big">😴</div>
         <div class="big">REST DAY</div>
-        <p>Your muscles grow during recovery. Sleep well, stay hydrated, and eat enough protein.<br>Active rest means light walking, stretching, and foam rolling.</p>
+        <p>Your muscles grow during recovery. Sleep well, stay hydrated, and eat enough protein.<br>Light walking, stretching, and foam rolling is all you need today.</p>
       </div>`;
     updateProgress(0, 0);
     return;
   }
 
-  let allExercises = [];
-  ['warmup', 'main', 'cooldown'].forEach(section => {
-    if (day[section] && day[section].length) {
-      day[section].forEach(ex => allExercises.push(section + ':' + ex.name));
-    }
-  });
-
   function buildSection(title, exercises, sectionKey) {
     if (!exercises || !exercises.length) return '';
     const cards = exercises.map(ex => {
-      const id = sectionKey + ':' + ex.name;
-      const done = !!state.completedExercises[todayKey][id];
+      const exId = sectionKey + '::' + ex.name;
+      const safeId = 'ec_' + exId.replace(/[^a-zA-Z0-9]/g, '_');
+      const done = !!state.completedExercises[viewKey][exId];
       const isCardio = ex.muscle && ex.muscle.toLowerCase().includes('cardio');
-      return `<div class="exercise-card ${done ? 'done' : ''} ${isCardio ? 'cardio-card' : ''}" id="card-${CSS.escape(id)}">
-        <div class="exercise-top" onclick="toggleExpand(this.closest('.exercise-card'), event)" style="cursor:pointer;">
+      // Store exId in a data attribute to avoid all quoting issues in onclick
+      const escapedId = exId.replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return `<div class="exercise-card ${done ? 'done' : ''} ${isCardio ? 'cardio-card' : ''}" id="${safeId}" data-exid="${escapedId}" data-total="${allExercises.length}">
+        <div class="exercise-top ex-expand" style="cursor:pointer;">
           <div class="exercise-name">${ex.name}</div>
-          <div class="check-circle" onclick="event.stopPropagation(); toggleExercise('${id}', ${allExercises.length})">${done ? '✓' : ''}</div>
+          <div class="check-circle">${done ? '✓' : ''}</div>
         </div>
-        <div class="exercise-meta" onclick="toggleExpand(this.closest('.exercise-card'), event)" style="cursor:pointer;">
+        <div class="exercise-meta ex-expand" style="cursor:pointer;">
           <span class="meta-tag accent">${ex.sets} sets</span>
           <span class="meta-tag">${ex.reps}</span>
           ${ex.muscle ? `<span class="meta-tag ${isCardio ? 'cardio' : ''}">${ex.muscle}</span>` : ''}
         </div>
         <div class="exercise-tip">${ex.tip}</div>
-        <div style="margin-top:8px; font-family:'DM Mono',monospace; font-size:0.6rem; color:var(--muted);" onclick="toggleExercise('${id}', ${allExercises.length})">
-          <span style="cursor:pointer; border:1px solid var(--border); border-radius:20px; padding:3px 10px;">${done ? '✓ Done — tap to undo' : 'Tap to mark done'}</span>
+        <div style="margin-top:10px;">
+          <button class="done-btn ex-toggle ${done ? 'done-btn-active' : ''}">${done ? '✓ Done — tap to undo' : 'Tap to mark done'}</button>
         </div>
       </div>`;
     }).join('');
@@ -1108,39 +1181,69 @@ function renderWorkout() {
     buildSection('Main Workout', day.main, 'main') +
     buildSection('Cool-Down', day.cooldown, 'cooldown');
 
-  updateProgressFromState(allExercises.length, todayKey);
+  updateProgressFromState(allExercises.length, viewKey);
 }
 
-function toggleExercise(id, total) {
-  const todayKey = getTodayKey();
-  if (state.completedExercises[todayKey][id]) {
-    delete state.completedExercises[todayKey][id];
+function toggleExercise(exId, total) {
+  const viewKey = getViewKey();
+  if (!state.completedExercises[viewKey]) state.completedExercises[viewKey] = {};
+
+  const wasDone = !!state.completedExercises[viewKey][exId];
+  if (wasDone) {
+    delete state.completedExercises[viewKey][exId];
   } else {
-    state.completedExercises[todayKey][id] = true;
-    showToast('✓ ' + id.split(':')[1]);
+    state.completedExercises[viewKey][exId] = true;
+    const name = exId.split('::')[1] || exId;
+    showToast('✓ ' + name);
   }
   saveState();
 
-  const card = document.querySelector(`[id="card-${CSS.escape(id)}"]`);
+  const safeId = 'ec_' + exId.replace(/[^a-zA-Z0-9]/g, '_');
+  const card = document.getElementById(safeId);
   if (card) {
-    const done = !!state.completedExercises[todayKey][id];
-    card.classList.toggle('done', done);
-    card.querySelector('.check-circle').textContent = done ? '✓' : '';
-    const doneBtn = card.querySelector('[style*="cursor:pointer; border"]');
-    if (doneBtn) doneBtn.textContent = done ? '✓ Done — tap to undo' : 'Tap to mark done';
+    const now = !!state.completedExercises[viewKey][exId];
+    card.classList.toggle('done', now);
+    const circle = card.querySelector('.check-circle');
+    if (circle) circle.textContent = now ? '✓' : '';
+    const btn = card.querySelector('.done-btn');
+    if (btn) {
+      btn.textContent = now ? '✓ Done — tap to undo' : 'Tap to mark done';
+      btn.classList.toggle('done-btn-active', now);
+    }
   }
 
-  updateProgressFromState(total, todayKey);
-  logWorkoutDay(todayKey);
+  updateProgressFromState(total, viewKey);
+  logWorkoutDay(viewKey);
 }
 
-function toggleExpand(el, event) {
-  event.stopPropagation();
-  el.classList.toggle('collapsed');
+function toggleExpand(card) {
+  card.classList.toggle('collapsed');
 }
 
-function updateProgressFromState(total, todayKey) {
-  const done = Object.keys(state.completedExercises[todayKey] || {}).length;
+// Single delegated listener on workout-content — avoids all inline onclick quoting issues
+document.addEventListener('click', function(e) {
+  // Toggle done button
+  const toggleBtn = e.target.closest('.ex-toggle');
+  if (toggleBtn) {
+    e.stopPropagation();
+    const card = toggleBtn.closest('.exercise-card');
+    if (card) {
+      const exId = card.dataset.exid;
+      const total = parseInt(card.dataset.total, 10);
+      toggleExercise(exId, total);
+    }
+    return;
+  }
+  // Expand/collapse on top/meta click
+  const expandEl = e.target.closest('.ex-expand');
+  if (expandEl) {
+    const card = expandEl.closest('.exercise-card');
+    if (card) toggleExpand(card);
+  }
+});
+
+function updateProgressFromState(total, viewKey) {
+  const done = Object.keys(state.completedExercises[viewKey] || {}).length;
   updateProgress(done, total);
 }
 
@@ -1152,12 +1255,11 @@ function updateProgress(done, total) {
   document.getElementById('progressText').textContent = pct + '%';
 }
 
-function logWorkoutDay(todayKey) {
-  const dayNum = getDayOfWeek();
+function logWorkoutDay(viewKey) {
+  const dayNum = getViewDayOfWeek();
   const day = WEEKLY_ROUTINE[dayNum];
-  const done = Object.keys(state.completedExercises[todayKey] || {}).length;
-  if (!state.workoutLog[todayKey]) state.workoutLog[todayKey] = {};
-  state.workoutLog[todayKey] = {
+  const done = Object.keys(state.completedExercises[viewKey] || {}).length;
+  state.workoutLog[viewKey] = {
     day: day.name,
     done: done,
     total: (day.warmup?.length || 0) + (day.main?.length || 0) + (day.cooldown?.length || 0)
@@ -1169,8 +1271,8 @@ function logWorkoutDay(todayKey) {
 // FOOD LOG
 // =====================
 function renderFoodLog() {
-  const todayKey = getTodayKey();
-  const log = state.foodLog[todayKey] || [];
+  const viewKey = getViewKey();
+  const log = state.foodLog[viewKey] || [];
   const list = document.getElementById('foodLogList');
 
   if (log.length === 0) {
@@ -1226,19 +1328,19 @@ function addFoodItem() {
 }
 
 function saveFood(item) {
-  const todayKey = getTodayKey();
-  if (!state.foodLog[todayKey]) state.foodLog[todayKey] = [];
+  const viewKey = getViewKey();
+  if (!state.foodLog[viewKey]) state.foodLog[viewKey] = [];
   const now = new Date();
   item.time = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  state.foodLog[todayKey].push(item);
+  state.foodLog[viewKey].push(item);
   saveState();
   renderFoodLog();
   showToast('🍽 ' + item.name + ' added!');
 }
 
 function deleteFood(i) {
-  const todayKey = getTodayKey();
-  state.foodLog[todayKey].splice(i, 1);
+  const viewKey = getViewKey();
+  state.foodLog[viewKey].splice(i, 1);
   saveState();
   renderFoodLog();
 }
@@ -1297,7 +1399,7 @@ function renderProgress() {
 }
 
 function renderWeekGrid() {
-  const today = new Date();
+  const today = new Date(getRealTodayKey() + 'T12:00:00');
   const dayNames = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
   const todayIdx = today.getDay();
   const grid = document.getElementById('weekGrid');
@@ -1307,9 +1409,10 @@ function renderWeekGrid() {
     d.setDate(today.getDate() - todayIdx + i);
     const key = d.toISOString().split('T')[0];
     const log = state.workoutLog[key];
-    const pct = log ? Math.round((log.done / log.total) * 100) : 0;
+    const pct = log && log.total > 0 ? Math.round((log.done / log.total) * 100) : 0;
     const isToday = i === todayIdx;
-    return `<div class="week-day-cell ${log ? 'has-data' : ''} ${isToday ? 'today' : ''}">
+    const isView = key === currentViewDate;
+    return `<div class="week-day-cell ${log ? 'has-data' : ''} ${isToday ? 'today' : ''} ${isView && !isToday ? 'viewing' : ''}">
       <div class="week-day-name">${dayNames[i]}</div>
       <div class="week-day-score">${log ? pct + '%' : '—'}</div>
     </div>`;
@@ -1335,10 +1438,10 @@ function renderStats() {
 
   // Streak
   let streak = 0;
-  const d = new Date();
+  const d = new Date(getRealTodayKey() + 'T12:00:00');
   while (true) {
     const key = d.toISOString().split('T')[0];
-    if (state.workoutLog[key]) { streak++; d.setDate(d.getDate() - 1); }
+    if (state.workoutLog[key] && state.workoutLog[key].done > 0) { streak++; d.setDate(d.getDate() - 1); }
     else break;
   }
   document.getElementById('streakNum').textContent = streak;
@@ -1371,11 +1474,14 @@ function renderHistory() {
 // DATE HEADER
 // =====================
 function updateHeader() {
-  const now = new Date();
+  const d = new Date(currentViewDate + 'T12:00:00');
   const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  document.getElementById('headerDay').textContent = days[now.getDay()];
-  document.getElementById('headerDate').textContent = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Dec'];
+  const monthsFull = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const realToday = getRealTodayKey();
+  const isToday = currentViewDate === realToday;
+  document.getElementById('headerDay').textContent = days[d.getDay()] + (isToday ? ' (Today)' : '');
+  document.getElementById('headerDate').textContent = `${d.getDate()} ${monthsFull[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 // =====================
