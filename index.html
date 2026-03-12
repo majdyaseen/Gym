@@ -1046,21 +1046,51 @@ function loadState() {
   if (!state.workoutLog) state.workoutLog = {};
   if (!state.foodLog) state.foodLog = {};
   if (!state.completedExercises) state.completedExercises = {};
-  // Default view date: load from storage so it persists across reload
-  // but NEVER auto-advance — user must press "Next Day"
-  if (!state.viewDate) {
-    state.viewDate = new Date().toISOString().split('T')[0];
-    saveState();
-  }
+  if (!state.viewDate) state.viewDate = getLocalDateKey();
+  // Persistent counters — survive pruning
+  if (!state.streak) state.streak = 0;
+  if (!state.lastStreakDate) state.lastStreakDate = null;
+  if (!state.totalWorkouts) state.totalWorkouts = 0;
+  if (!state.totalExercisesDone) state.totalExercisesDone = 0;
   currentViewDate = state.viewDate;
+  pruneOldData();
+  saveState();
+}
+
+function pruneOldData() {
+  const KEEP_DAYS = 90;
+  const today = new Date();
+  const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - KEEP_DAYS);
+  const cutoffKey = getLocalDateKey(cutoff);
+
+  let pruned = 0;
+  for (const key of Object.keys(state.workoutLog)) {
+    if (key < cutoffKey) { delete state.workoutLog[key]; pruned++; }
+  }
+  for (const key of Object.keys(state.foodLog)) {
+    if (key < cutoffKey) { delete state.foodLog[key]; pruned++; }
+  }
+  for (const key of Object.keys(state.completedExercises)) {
+    if (key < cutoffKey) { delete state.completedExercises[key]; pruned++; }
+  }
+  if (pruned > 0) console.log(`IronLog: pruned ${pruned} entries older than ${KEEP_DAYS} days`);
 }
 
 function saveState() {
   localStorage.setItem('ironlog', JSON.stringify(state));
 }
 
+function getLocalDateKey(date) {
+  // Always use LOCAL date — never toISOString() which is UTC
+  const d = date || new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function getRealTodayKey() {
-  return new Date().toISOString().split('T')[0];
+  return getLocalDateKey(); // local date, not UTC
 }
 
 function getViewKey() {
@@ -1068,13 +1098,16 @@ function getViewKey() {
 }
 
 function getViewDayOfWeek() {
-  return new Date(currentViewDate + 'T12:00:00').getDay();
+  // Parse stored date string as local by splitting manually
+  const [y, m, d] = currentViewDate.split('-').map(Number);
+  return new Date(y, m - 1, d).getDay();
 }
 
 function navigateDay(delta) {
-  const d = new Date(currentViewDate + 'T12:00:00');
-  d.setDate(d.getDate() + delta);
-  currentViewDate = d.toISOString().split('T')[0];
+  const [y, m, d] = currentViewDate.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + delta);
+  currentViewDate = getLocalDateKey(date);
   state.viewDate = currentViewDate;
   saveState();
   renderWorkout();
@@ -1259,12 +1292,66 @@ function logWorkoutDay(viewKey) {
   const dayNum = getViewDayOfWeek();
   const day = WEEKLY_ROUTINE[dayNum];
   const done = Object.keys(state.completedExercises[viewKey] || {}).length;
+  const prevEntry = state.workoutLog[viewKey];
+  const prevDone = prevEntry ? prevEntry.done : 0;
+
   state.workoutLog[viewKey] = {
     day: day.name,
     done: done,
     total: (day.warmup?.length || 0) + (day.main?.length || 0) + (day.cooldown?.length || 0)
   };
+
+  // Update persistent total exercises count
+  // Add the net difference so toggling on/off stays accurate
+  state.totalExercisesDone = (state.totalExercisesDone || 0) + (done - prevDone);
+  if (state.totalExercisesDone < 0) state.totalExercisesDone = 0;
+
+  // Update persistent streak — only counts if this is a real workout day (done > 0)
+  updateStreak(viewKey, done, prevDone);
+
   saveState();
+}
+
+function updateStreak(viewKey, done, prevDone) {
+  const todayKey = getRealTodayKey();
+
+  // Only update streak logic for today's workout (not historical browsing)
+  if (viewKey !== todayKey) return;
+
+  const wasActiveToday = prevDone > 0;
+  const isActiveToday = done > 0;
+
+  if (isActiveToday && !wasActiveToday) {
+    // Just became active today — check if yesterday was active to continue streak
+    const [y, m, d] = todayKey.split('-').map(Number);
+    const yesterday = getLocalDateKey(new Date(y, m - 1, d - 1));
+    const yesterdayLog = state.workoutLog[yesterday];
+    const yesterdayActive = yesterdayLog && yesterdayLog.done > 0;
+
+    if (state.lastStreakDate === yesterday || yesterdayActive) {
+      // Continuing the streak
+      state.streak = (state.streak || 0) + 1;
+    } else if (state.lastStreakDate !== todayKey) {
+      // Streak broken — starting fresh
+      state.streak = 1;
+    }
+    state.lastStreakDate = todayKey;
+    state.totalWorkouts = (state.totalWorkouts || 0) + 1;
+
+  } else if (!isActiveToday && wasActiveToday) {
+    // Unticked the last exercise for today — undo today's streak contribution
+    if (state.lastStreakDate === todayKey) {
+      state.streak = Math.max(0, (state.streak || 1) - 1);
+      state.totalWorkouts = Math.max(0, (state.totalWorkouts || 1) - 1);
+      // Roll back lastStreakDate to yesterday if streak > 0
+      if (state.streak > 0) {
+        const [y, m, d] = todayKey.split('-').map(Number);
+        state.lastStreakDate = getLocalDateKey(new Date(y, m - 1, d - 1));
+      } else {
+        state.lastStreakDate = null;
+      }
+    }
+  }
 }
 
 // =====================
@@ -1399,15 +1486,16 @@ function renderProgress() {
 }
 
 function renderWeekGrid() {
-  const today = new Date(getRealTodayKey() + 'T12:00:00');
-  const dayNames = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+  const todayKey = getRealTodayKey();
+  const [ty, tm, td] = todayKey.split('-').map(Number);
+  const today = new Date(ty, tm - 1, td);
   const todayIdx = today.getDay();
+  const dayNames = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
   const grid = document.getElementById('weekGrid');
 
   const cells = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(today);
-    d.setDate(today.getDate() - todayIdx + i);
-    const key = d.toISOString().split('T')[0];
+    const d = new Date(ty, tm - 1, td - todayIdx + i);
+    const key = getLocalDateKey(d);
     const log = state.workoutLog[key];
     const pct = log && log.total > 0 ? Math.round((log.done / log.total) * 100) : 0;
     const isToday = i === todayIdx;
@@ -1421,32 +1509,39 @@ function renderWeekGrid() {
 }
 
 function renderStats() {
-  const workoutDays = Object.keys(state.workoutLog).length;
-  const totalExercises = Object.values(state.completedExercises)
-    .reduce((sum, d) => sum + Object.keys(d).length, 0);
-  const weeksActive = Math.floor(workoutDays / 3);
+  // Use persistent counters — these survive pruning
+  const totalWorkouts = state.totalWorkouts || 0;
+  const totalExercises = state.totalExercisesDone || 0;
+  const weeksActive = Math.floor(totalWorkouts / 4); // ~4 workout days/week
 
   const foodDays = Object.values(state.foodLog).filter(d => d.length > 0);
   const avgCal = foodDays.length
     ? Math.round(foodDays.reduce((sum, d) => sum + d.reduce((s, f) => s + f.cal, 0), 0) / foodDays.length)
     : 0;
 
-  document.getElementById('statWorkouts').textContent = workoutDays;
+  document.getElementById('statWorkouts').textContent = totalWorkouts;
   document.getElementById('statExercises').textContent = totalExercises;
   document.getElementById('statWeeks').textContent = weeksActive;
   document.getElementById('statCalAvg').textContent = avgCal;
 
-  // Streak
-  let streak = 0;
-  const d = new Date(getRealTodayKey() + 'T12:00:00');
-  while (true) {
-    const key = d.toISOString().split('T')[0];
-    if (state.workoutLog[key] && state.workoutLog[key].done > 0) { streak++; d.setDate(d.getDate() - 1); }
-    else break;
+  // Streak: persistent, not recalculated from pruned log
+  // But check if the streak has gone stale (missed yesterday)
+  const todayKey = getRealTodayKey();
+  const [y, m, d] = todayKey.split('-').map(Number);
+  const yesterday = getLocalDateKey(new Date(y, m - 1, d - 1));
+  const lastDate = state.lastStreakDate;
+  let streak = state.streak || 0;
+
+  // If last activity was before yesterday, streak is broken
+  if (lastDate && lastDate < yesterday) {
+    streak = 0;
+    state.streak = 0;
+    saveState();
   }
+
   document.getElementById('streakNum').textContent = streak;
   document.getElementById('streakMsg').textContent = streak > 0
-    ? `You've worked out ${streak} day${streak > 1 ? 's' : ''} in a row. Keep going!`
+    ? `${streak} day${streak > 1 ? 's' : ''} in a row — keep going! 🔥`
     : 'Complete a workout today to start your streak!';
 }
 
@@ -1474,14 +1569,13 @@ function renderHistory() {
 // DATE HEADER
 // =====================
 function updateHeader() {
-  const d = new Date(currentViewDate + 'T12:00:00');
+  const [y, m, d] = currentViewDate.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
   const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Dec'];
-  const monthsFull = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const realToday = getRealTodayKey();
-  const isToday = currentViewDate === realToday;
-  document.getElementById('headerDay').textContent = days[d.getDay()] + (isToday ? ' (Today)' : '');
-  document.getElementById('headerDate').textContent = `${d.getDate()} ${monthsFull[d.getMonth()]} ${d.getFullYear()}`;
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const isToday = currentViewDate === getRealTodayKey();
+  document.getElementById('headerDay').textContent = days[date.getDay()] + (isToday ? ' (Today)' : '');
+  document.getElementById('headerDate').textContent = `${date.getDate()} ${months[date.getMonth()]} ${date.getFullYear()}`;
 }
 
 // =====================
